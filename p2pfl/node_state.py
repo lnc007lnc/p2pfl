@@ -77,6 +77,12 @@ class NodeState:
         self.model_initialized_lock.acquire()
         self.aggregated_model_event = threading.Event()
         self.aggregated_model_event.set()
+        
+        #Torrent part
+        self.received_torrents: set[str] = set()
+        self.seed_sessions: list = []
+        self.generated_torrent_rounds: set[int] = set()
+        self.download_event = threading.Event()
 
     @property
     def round(self) -> Optional[int]:

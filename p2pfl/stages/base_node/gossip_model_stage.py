@@ -28,6 +28,10 @@ from p2pfl.node_state import NodeState
 from p2pfl.stages.stage import Stage, check_early_stop
 from p2pfl.stages.stage_factory import StageFactory
 
+import os
+import libtorrent as lt
+#from p2pfl.communication.commands.weights.torrent_file_command import TorrentFileCommand
+import hashlib
 
 class GossipModelStage(Stage):
     """Gossip model stage."""
@@ -49,7 +53,32 @@ class GossipModelStage(Stage):
         if state is None or aggregator is None or communication_protocol is None or learner is None:
             raise Exception("Invalid parameters on GossipModelStage.")
 
+        logger.info(state.addr, "🗣️ Gossiping aggregated model.")
+
+        # 确保上一轮事件已被清除
+        # —— 新增：关闭所有 seeding sessions ——
+        for ses in getattr(state, "seed_sessions", []):
+            # 把该 session 里的所有 torrent handle 移除，不删除已下载文件
+            for th in ses.get_torrents():
+                try:
+                    ses.remove_torrent(th)
+                except Exception as e:
+                    logger.warning(state.addr, f"[Torrent] Failed to remove torrent: {e}")
+            # 可选：暂停 session
+            try:
+                ses.pause()
+            except Exception:
+                pass
+        # 清空列表
+        state.seed_sessions = []
+
         GossipModelStage.__gossip_model_difusion(state, communication_protocol, learner)
+
+        # 阻塞直到后台下载线程通过 FullModelCommand.execute 设置 event
+        logger.info(state.addr, "⏳ Waiting for model download to complete...")
+        state.download_event.wait()
+        logger.info(state.addr, "✅ Model download and set_model finished.")
+
         return StageFactory.get_stage("RoundFinishedStage")
 
     @staticmethod
@@ -72,13 +101,71 @@ class GossipModelStage(Stage):
         def status_fn() -> Any:
             return get_candidates_fn()
 
-        def model_fn(node: str) -> tuple[Any, str, int, list[str]]:
-            if state.round is None:
-                raise Exception("Round not initialized")
-            encoded_model = learner.get_model().encode_parameters()
+        # def model_fn(node: str) -> tuple[Any, str, int, list[str]]:
+        #     if state.round is None:
+        #         raise Exception("Round not initialized")
+        #     encoded_model = learner.get_model().encode_parameters()
+        #     return (
+        #         communication_protocol.build_weights(FullModelCommand.get_name(), state.round, encoded_model),
+        #         FullModelCommand.get_name(),
+        #         state.round,
+        #         [str(state.round)],
+        #     )
+        def model_fn(node: str) -> tuple[bytes, str, int, list[str]]:
+            # 1. 取得编码后的模型权重
+            encoded = learner.get_model().encode_parameters()
+
+            data_hash = hashlib.sha1(encoded).hexdigest()
+
+            # 2. 保存模型文件供 BitTorrent 使用
+            src_dir = os.path.join(os.getcwd(), "bittorrent_source")
+            os.makedirs(src_dir, exist_ok=True)
+            model_filename = os.path.join(src_dir, f"round{state.round}_{data_hash}.pt")
+            with open(model_filename, "wb") as mf:
+                mf.write(encoded)
+
+            # 3. 构建 torrent 元数据
+            fs = lt.file_storage()
+            lt.add_files(fs, model_filename)
+            tor = lt.create_torrent(fs)
+            tor.add_tracker("udp://tracker.openbittorrent.com:80")
+            tor.add_tracker("udp://tracker.leechers-paradise.org:6969/announce")
+            tor.add_tracker("http://tracker.opentrackr.org:1337/announce")
+            tor.add_tracker("udp://tracker.coppersurfer.tk:6969/announce")
+            # 关键：计算 piece hashes
+            lt.set_piece_hashes(tor, src_dir)
+
+            meta = tor.generate()
+            torrent_data = lt.bencode(meta)
+
+            # 4. 保存 .torrent 文件到本地，供 seeding & 调试
+            info = lt.torrent_info(lt.bdecode(torrent_data))
+            info_hash = info.info_hash()
+            torrent_dir = os.path.join(os.getcwd(), "torrents")
+            os.makedirs(torrent_dir, exist_ok=True)
+            torrent_path = os.path.join(torrent_dir, f"round{state.round}_{info_hash}.torrent")
+            with open(torrent_path, "wb") as f:
+                f.write(torrent_data)
+            logger.info(state.addr, f"[Torrent] Generated and saved torrent to {torrent_path}")
+
+            # 5. 启动 seeding 会话，让本节点也做种
+            ses = lt.session()
+            #ses.listen_on(6881, 6891)
+            ti = lt.torrent_info(torrent_path)
+            ses.add_torrent({"ti": ti, "save_path": src_dir})
+            # 保持 session 引用，避免被 GC 关闭
+            state.seed_sessions.append(ses)
+
+            # 6. 返回 payload，仍然通过 Gossip 交换 torrent_data
+
+            payload = communication_protocol.build_weights(
+                "TorrentFileCommand",
+                state.round,
+                torrent_data,
+            )
             return (
-                communication_protocol.build_weights(FullModelCommand.get_name(), state.round, encoded_model),
-                FullModelCommand.get_name(),
+                payload,
+                "TorrentFileCommand",
                 state.round,
                 [str(state.round)],
             )

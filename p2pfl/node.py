@@ -51,6 +51,8 @@ from p2pfl.node_state import NodeState
 from p2pfl.settings import Settings
 from p2pfl.stages.workflows import LearningWorkflow
 
+from p2pfl.communication.commands.weights.torrent_file_command import TorrentFileCommand
+
 # Disbalbe grpc log (pytorch causes warnings)
 if logger.get_level_name(logger.get_level()) != "DEBUG":
     os.environ["GRPC_VERBOSITY"] = "NONE"
@@ -63,13 +65,13 @@ class Node:
     The following example shows how to create a node with a MLP model and a MnistFederatedDM dataset. Then, the node is
     started, connected to another node, and the learning process is started.
 
-    >>> node = Node(
-    ...     MLP(),
-    ...     MnistFederatedDM(),
-    ... )
-    >>> node.start()
-    >>> node.connect("127.0.0.1:666")
-    >>> node.set_start_learning(rounds=2, epochs=1)
+    # >>> node = Node(
+    # ...     MLP(),
+    # ...     MnistFederatedDM(),
+    # ... )
+    # >>> node.start()
+    # >>> node.connect("127.0.0.1:666")
+    # >>> node.set_start_learning(rounds=2, epochs=1)
 
     Args:
         model: Model to be used in the learning process.
@@ -134,8 +136,9 @@ class Node:
             MetricsCommand(self.state),
             InitModelCommand(self.state, self.stop, self.aggregator, self.learner),
             PartialModelCommand(self.state, self.stop, self.aggregator, self._communication_protocol, self.learner),
-            FullModelCommand(self.state, self.stop, self.aggregator, self.learner),
+            #FullModelCommand(self.state, self.stop, self.aggregator, self.learner),
             PreSendModelCommand(self.state),
+            TorrentFileCommand(self.state, self.stop, self.aggregator, self.learner, self._communication_protocol),
         ]
         self._communication_protocol.add_command(commands)
 

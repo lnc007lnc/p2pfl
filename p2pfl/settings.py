@@ -108,7 +108,7 @@ class SSL:
 class Training:
     """Training process settings."""
 
-    VOTE_TIMEOUT: int = 60
+    VOTE_TIMEOUT: int = 10000000
     """Timeout (seconds) for a node to wait for a vote."""
     AGGREGATION_TIMEOUT: int = 300
     """Timeout (seconds) for a node to wait for other models. Timeout starts when the first model is added."""
